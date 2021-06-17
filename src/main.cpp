@@ -20,7 +20,7 @@ const double MAX_VEL = 49.5;
 const double MAX_ACC = .4026485; // .18m/s per .02 sec -> because the max acc is 10m/s2
 const double MAX_DEC = 1.8*MAX_ACC;
 
-const double PROJECTION_IN_METERS = 30.0;
+const double PROJECTION_IN_METERS = 40.0;
 
 const int LEFT_LANE = 0;
 const int MIDDLE_LANE = 1;
@@ -97,7 +97,7 @@ int main() {
       // from state            ,to state                ,triggers, guard ,action
       { States::Ready          ,States::KeepLane        ,Triggers::Clear,
         [&]{return !car_ahead && lane != INVALID_LANE;},
-        [&]{ref_vel += 1.1*MAX_ACC;} },
+        [&]{ref_vel += 3*MAX_ACC;} },
 
       { States::KeepLane       ,States::KeepLane        ,Triggers::Clear,
         [&]{return !car_ahead;},
@@ -246,7 +246,7 @@ int main() {
           }
 
           // Debug
-          // std::cout << "left_ahead_right: " << car_left << "  " << car_ahead << "  " << car_right << "  " << "too_close:" << too_close << "\n";
+          std::cout << "left_ahead_right: " << car_left << "  " << car_ahead << "  " << car_right << "  " << "\n";
 
 
           // Create a list of widely spaced (x,y) waypoints, evenly spaced at 30m
