@@ -8,7 +8,7 @@
 #include "helpers.h"
 #include "json.hpp"
 #include "spline.h"
-#include "fsm.h"
+// #include "fsm.h"
 
 // for convenience
 using nlohmann::json;
@@ -20,7 +20,7 @@ const double MAX_VEL = 49.5;
 const double MAX_ACC = .4026485; // .18m/s per .02 sec -> because the max acc is 10m/s2
 const double MAX_DEC = 1.8*MAX_ACC;
 
-const double PROJECTION_IN_METERS = 40.0;
+const double PROJECTION_IN_METERS = 30.0;
 
 const int LEFT_LANE = 0;
 const int MIDDLE_LANE = 1;
@@ -31,17 +31,17 @@ const int LEFT_LANE_MAX = 4;
 const int MIDDLE_LANE_MAX = 8;
 const int RIGHT_LANE_MAX = 12;
 
-enum States { Ready, KeepLane, PrepChangeLeft, PrepChangeRight, ChangeLeft, ChangeRight };
-enum Triggers {  CarAhead, Clear, SafeToChange };
-FSM::Fsm<States, States::Ready, Triggers> fsm;
-const char * StateNames[] = { "Ready", "Keep in Lane", "Prepare Change to Left Lane", 
-                              "Prepare Change to Right Lane", "Change To Left Lane", "Change To Right Lane" };
+// enum States { Ready, KeepLane, FollowFront, PrepLaneSwitch };
+// enum Triggers {  CarAhead, Clear, SafeToChange };
+// FSM::Fsm<States, States::Ready, Triggers> fsm;
+// const char * StateNames[] = { "Ready", "Keep in Lane", "Follow Vehicle in Front", 
+//                               "Prepare to Lane Switch" };
 
-void dbg_fsm(States from_state, States to_state, Triggers trigger) {
-    if (from_state != to_state) {
-        std::cout << "State Changed To: " << StateNames[to_state] << "\n";
-    }
-}
+// void dbg_fsm(States from_state, States to_state, Triggers trigger) {
+//     if (from_state != to_state) {
+//         std::cout << "State Changed To: " << StateNames[to_state] << "\n";
+//     }
+// }
 
 
 int main() {
@@ -81,67 +81,20 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
-  // Start in lane 1
+  // Reference lane 1
   int lane = 1;
 
-  // Have a reference velocity to target
-  double ref_vel = 0.0; // mph
+  // Reference velocity
+  double ref_vel = 0;
 
-  // define obstacle position
-  bool car_ahead = false;
-  bool car_left = false;
-  bool car_right = false;
-
-  // State Machine Setup
-  fsm.add_transitions({
-      // from state            ,to state                ,triggers, guard ,action
-      { States::Ready          ,States::KeepLane        ,Triggers::Clear,
-        [&]{return !car_ahead && lane != INVALID_LANE;},
-        [&]{ref_vel += 3*MAX_ACC;} },
-
-      { States::KeepLane       ,States::KeepLane        ,Triggers::Clear,
-        [&]{return !car_ahead;},
-        [&]{if (ref_vel < MAX_VEL) { ref_vel += MAX_ACC; }} },
-      { States::KeepLane       ,States::PrepChangeLeft  ,Triggers::CarAhead,
-        [&]{return lane > LEFT_LANE;},
-        [&]{ref_vel -= MAX_DEC;} },
-      { States::KeepLane       ,States::PrepChangeRight ,Triggers::CarAhead,
-        [&]{return lane > RIGHT_LANE;},
-        [&]{ref_vel -= MAX_DEC;} },
-
-      { States::PrepChangeLeft ,States::PrepChangeLeft  ,Triggers::CarAhead,
-        [&]{return true;},
-        [&]{ref_vel -= MAX_DEC;} },
-      { States::PrepChangeLeft ,States::ChangeLeft      ,Triggers::SafeToChange,
-        [&]{return car_ahead && !car_left;},
-        [&]{lane--;} },
-      { States::PrepChangeLeft ,States::KeepLane        ,Triggers::Clear,
-        [&]{return !car_ahead;},
-        [&]{ref_vel += MAX_ACC;} },
-
-      { States::PrepChangeRight,States::PrepChangeRight ,Triggers::CarAhead,
-        [&]{return true;},
-        [&]{ref_vel -= MAX_DEC;} },
-      { States::PrepChangeRight,States::ChangeRight     ,Triggers::SafeToChange,
-        [&]{return car_ahead && !car_right;},
-        [&]{lane++;} },
-      { States::PrepChangeRight,States::KeepLane        ,Triggers::Clear,
-        [&]{return !car_ahead;},
-        [&]{ref_vel += MAX_ACC;} },
-
-      { States::ChangeLeft,     States::KeepLane        ,Triggers::Clear,
-        [&]{return !car_ahead;},
-        [&]{} },
-      { States::ChangeRight,     States::KeepLane        ,Triggers::Clear,
-        [&]{return !car_ahead;},
-        [&]{} },
-  });
-
-  fsm.add_debug_fn(dbg_fsm);
-
-  h.onMessage([&car_ahead, &car_left, &car_right, &lane, &ref_vel,
-               &map_waypoints_x, &map_waypoints_y, &map_waypoints_s,
-               &map_waypoints_dx, &map_waypoints_dy]
+  // State
+  int state = 0;
+  
+  // Waiting counter to prevent multiple concurrent lane switches
+  int waiting = 100;
+  
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
+               &map_waypoints_dx,&map_waypoints_dy,&lane,&ref_vel,&state,&waiting]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -170,8 +123,6 @@ int main() {
           // Previous path data given to the Planner
           auto previous_path_x = j[1]["previous_path_x"];
           auto previous_path_y = j[1]["previous_path_y"];
-          int prev_size = previous_path_x.size();
-
           // Previous path's end s and d values 
           double end_path_s = j[1]["end_path_s"];
           double end_path_d = j[1]["end_path_d"];
@@ -180,193 +131,311 @@ int main() {
           //   of the road.
           auto sensor_fusion = j[1]["sensor_fusion"];
 
-          json msgJson;
+          json msgJson;         
 
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
-
-          /**
-           * TODO: define a path made up of (x,y) points that the car will visit
-           *   sequentially every .02 seconds
-           */
-          if (prev_size > 0){
+          int prev_size = previous_path_x.size();
+          
+          if (prev_size > 0)
+          {
             car_s = end_path_s;
           }
+          
+          // Initialize left/right velocities to the maximum reference, 
+          // which will be lowered if a car is detected in the nearby lane
+          double left_vel = MAX_VEL;
+          double right_vel = MAX_VEL;
+          
+          // Initialize the gap as true until proven false
+          bool gap_left = true;
+          bool gap_right = true;
+          
+          // Set up variables to detect and slow down the car
+          bool in_front = false;
+          double front_vel = MAX_VEL;
 
-          // Find ref_vel to use
-          for (int i = 0; i < sensor_fusion.size(); i++) {
-            // Car is in my lane
+          // Initialize detected car in left and right
+          bool isLeftCar = false;
+          bool isRightCar = false;
+
+          // Iterate through and use sensor fusion data
+          for (int i = 0; i < sensor_fusion.size(); i++)
+          {
+            // Other's car is in my lane
             float d = sensor_fusion[i][6];
-            int other_car_lane = INVALID_LANE;
+            
+            // Calculate the speed of the detected car
+            float vx = sensor_fusion[i][3];
+            float vy = sensor_fusion[i][4];
+            float check_speed = sqrt(pow(vx, 2) + pow(vy, 2)); 
+            float check_car_s = sensor_fusion[i][5];
+            
+            // If using previous points can project a value out
+            check_car_s += (double)prev_size * .02 * check_speed;
+            
+            // Match units of m/s to be the same as ref_vel
+            check_speed *= 2.24;
 
-            // Determine the lane of the other car
-            if ( d > 0 && d < LEFT_LANE_MAX ) {
-                other_car_lane = LEFT_LANE;
-            } else if ( d > LEFT_LANE_MAX && d < MIDDLE_LANE_MAX ) {
-                other_car_lane = MIDDLE_LANE;
-            } else if ( d > MIDDLE_LANE_MAX && d < RIGHT_LANE_MAX ) {
-                other_car_lane = RIGHT_LANE;
+            int car_lane;
+            
+            if (d > 0 && d < LEFT_LANE_MAX)
+              car_lane = LEFT_LANE;
+            else if (d > LEFT_LANE_MAX && d < MIDDLE_LANE_MAX)
+              car_lane = MIDDLE_LANE;
+            else if (d > MIDDLE_LANE_MAX && d < RIGHT_LANE_MAX)
+              car_lane = RIGHT_LANE;
+            else {
+              car_lane = INVALID_LANE;
+              continue;
             }
-            if (other_car_lane == INVALID_LANE) {
-                continue;
+
+            // Check ahead of current car's location
+            if (car_lane == lane)
+            {
+              // Check s values greater than mine and s gap
+              if (check_car_s - car_s > 0 && check_car_s - car_s < PROJECTION_IN_METERS)
+              {
+                // If a car is detected, change to state 1 to match its speed (if not over the speed limit)
+                state = 1;
+                in_front = true;
+                front_vel = check_speed;
+                
+                // Prepare to switch lanes if the car in front is slow, car isn't already preparing, and the timer is up between lane switches       
+                if (check_speed < 0.8*MAX_VEL && state != 2 && waiting == 0)
+					        state = 2;
+              }
             }
+            // Check left lane of car
+            else if (car_lane + 1 == lane)
+            {
+              isLeftCar = true;
 
-            // Determine the speed of the other car
-            double vx = sensor_fusion[i][3];
-            double vy = sensor_fusion[i][4];
-            double check_speed = sqrt(vx*vx + vy*vy);
-            double check_car_s = sensor_fusion[i][5];
-
-            // Estimate the other car's position after executing previous trajectory
-            check_car_s += (double) prev_size * 0.02 * check_speed;
-
-            if ( other_car_lane == lane ) {
-                // Other car is in the same lane
-                car_ahead |= check_car_s > car_s && check_car_s - car_s < PROJECTION_IN_METERS;
-            } else if ( other_car_lane - lane == -1 ) {
-                // Other car is on the left lane
-                car_left |= car_s - PROJECTION_IN_METERS < check_car_s && car_s + PROJECTION_IN_METERS > check_car_s;
-            } else if ( other_car_lane - lane == 1 ) {
-                // Other car is on the right lane
-                car_right |= car_s - PROJECTION_IN_METERS < check_car_s && car_s + PROJECTION_IN_METERS > check_car_s;
+              // Checks values greater than mine and s gap
+              if (abs(car_s + PROJECTION_IN_METERS-5) > check_car_s && abs(car_s - PROJECTION_IN_METERS-15) < check_car_s)
+                gap_left = false;
+              
+              // Obtain left lane speed
+              if (abs(car_s + PROJECTION_IN_METERS-5) < check_car_s && abs(car_s + PROJECTION_IN_METERS+15) > check_car_s)
+                left_vel = check_speed;
+            }
+            // Check right lane of car
+            else if (car_lane - 1 == lane)
+            {
+              isRightCar = true;
+              
+              // Checks values greater than mine and s gap
+              if (abs(car_s + PROJECTION_IN_METERS-5) > check_car_s && abs(car_s - PROJECTION_IN_METERS-15) < check_car_s)
+                gap_right = false;
+              
+              // Obtain right lane speed
+              if (abs(car_s + PROJECTION_IN_METERS-5) < check_car_s && abs(car_s + PROJECTION_IN_METERS+15) > check_car_s)
+                  right_vel = check_speed;
             }
           }
+          
+          // Variables to determine if lane changing is safe
+          bool left_turn = lane > LEFT_LANE && left_vel >= front_vel && gap_left;
+          bool right_turn = lane < RIGHT_LANE && right_vel >= front_vel && gap_right;
 
-          // 2. BEHAVIOR: Trigger State Changes Depending If Road Clear of Vehicle Ahead
-          if (car_ahead) {
-              // Execute 'CarAhead' trigger on state machine
-              fsm.execute(Triggers::CarAhead);
-              if (!car_left || !car_right) {
-                // Execute 'SafeToChange' trigger on state machine
-                fsm.execute(Triggers::SafeToChange);
+          // Decrement counter for 1 second total (0.02s x 50)
+          if (waiting > 0)
+            waiting--;
+          
+          // Finite State Machine:
+          // State 0 - Accelerating up to top reference speed with no car in front
+          // State 1 - Matching the speed of the car in front (minus 1.5m/s) to keep distance
+          // State 2 - Preparing + Lane Switching
+          if (state == 0) // Accelerate in empty road
+          {
+            if (ref_vel < MAX_VEL)
+              ref_vel += MAX_ACC;
+          }
+          else if (state == 1) // Match speed of car in front
+          {
+            // Extra -1 to prevent tailgating
+            if (front_vel - 1.5 < ref_vel)
+              ref_vel -= MAX_DEC;
+            else
+            {
+              if (ref_vel < MAX_VEL)
+                ref_vel += MAX_ACC;
+            }
+            if (gap_left || gap_right) {
+              state = 2;
+            }
+          }
+          else if (state == 2) // Preparing to switch lanes
+          {
+            if (in_front)
+            {
+              // Extra -1 to prevent tailgating
+              if (front_vel - 1.5 < ref_vel)
+                ref_vel -= MAX_DEC;
+              else
+              {
+                if (ref_vel < MAX_VEL)
+                  ref_vel += MAX_ACC;
               }
-          } else {
-              // Execute 'Clear' trigger on state machine
-              fsm.execute(Triggers::Clear);
+            }
+            else
+            {
+              if (ref_vel < MAX_VEL)
+                ref_vel += MAX_ACC;
+              else
+                ref_vel -= MAX_DEC;
+            }
+
+            // Choose faster lane to switch to
+            if (left_turn && right_turn)
+            {
+              if (left_vel > right_vel)
+                lane--;
+              else
+                lane++;
+            }
+            else if (right_turn)
+              lane++;
+            else if (left_turn)
+              lane--;
+
+            // Reset state and waiting counter after lane switch
+            if (left_turn || right_turn)
+            {
+              state = 0;
+              waiting = 100;
+            }
           }
 
           // Debug
-          std::cout << "left_ahead_right: " << car_left << "  " << car_ahead << "  " << car_right << "  " << "\n";
-
-
-          // Create a list of widely spaced (x,y) waypoints, evenly spaced at 30m
+          std::string _info;
+          switch (state) {
+            case 0:
+              _info = "No car in front, accelerating to top speed ...";
+              break;
+            case 1:
+              _info = "There is a car in front, following the vehicle.";
+              break;
+            case 2:
+              _info = "Preparing to switch lane.";
+              break;
+          }
+          std::cout << "vel_l_f_r: " << left_vel << "  " << front_vel << "  " << right_vel << "\n";
+          std::cout << "isCar_l_r: " << isLeftCar << "  " << isRightCar << "\n";
+          std::cout << "gap_l_r: " << gap_left << "  " << gap_right << "\n";
+          std::cout << "turn_l_r: " << left_turn << "  " << right_turn << "\n";
+          std::cout << "State: " << _info << "\n\n";
+          
+          // Vectors to store to-be-generated path
           vector<double> ptsx;
           vector<double> ptsy;
-
-          // reference x, y, yaw states
-          // either we will reference the starting point as where the car is or at the prev paths end point
+          
+          // Store variables and convert to radians
           double ref_x = car_x;
           double ref_y = car_y;
           double ref_yaw = deg2rad(car_yaw);
-
-          // If previous size is almost empty, use car as starting reference
-            if (prev_size < 2) {
-                // Use two points that make the path tangent to the car
-                double prev_car_x = car_x - cos(car_yaw);
-                double prev_car_y = car_y - sin(car_yaw);
-
-                ptsx.push_back(prev_car_x);
-                ptsx.push_back(car_x);
-
-                ptsy.push_back(prev_car_y);
-                ptsy.push_back(car_y);
-            }
-            // Use previous path's points as starting reference
-            else {
-                // Redefine reference state as previous path endpoint
-                ref_x = previous_path_x[prev_size-1];
-                ref_y = previous_path_y[prev_size-1];
-
-                double ref_x_prev = previous_path_x[prev_size-2];
-                double ref_y_prev = previous_path_y[prev_size-2];
-                ref_yaw = atan2(ref_y-ref_y_prev,ref_x-ref_x_prev);
-
-                // Use two points that make the path tangent to the previous path's endpoint
-                ptsx.push_back(ref_x_prev);
-                ptsx.push_back(ref_x);
-
-                ptsy.push_back(ref_y_prev);
-                ptsy.push_back(ref_y);
-            }
-
+          
+          // If previous data is limited, use current position as well
+          if (prev_size < 2)
+          {
+            double prev_car_x = car_x - cos(car_yaw);
+            double prev_car_y = car_y - sin(car_yaw);
+            
+            ptsx.push_back(prev_car_x);
+            ptsx.push_back(car_x);
+            
+            ptsy.push_back(prev_car_y);
+            ptsy.push_back(car_y);
+          }
+          // Use previous data to ensure path is smooth
+          else
+          {
+            // Redefine reference state as previous path and point
+            ref_x = previous_path_x[prev_size-1];
+            ref_y = previous_path_y[prev_size-1];
+            
+            double ref_x_prev = previous_path_x[prev_size-2];
+            double ref_y_prev = previous_path_y[prev_size-2];
+            ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+            
+            // Use two points that make hte point tangent to the previous path's end point
+            ptsx.push_back(ref_x_prev);
+            ptsx.push_back(ref_x);
+            
+            ptsy.push_back(ref_y_prev);
+            ptsy.push_back(ref_y);
+          }
+          
           // In Frenet add evenly 30m spaced points ahead of the starting reference
-          vector<double> next_wp0 = getXY(car_s+PROJECTION_IN_METERS,
-                                          (2+4*lane),
-                                          map_waypoints_s,
-                                          map_waypoints_x,
-                                          map_waypoints_y);
-          vector<double> next_wp1 = getXY(car_s+PROJECTION_IN_METERS*2,
-                                          (2+4*lane),
-                                          map_waypoints_s,
-                                          map_waypoints_x,
-                                          map_waypoints_y);
-          vector<double> next_wp2 = getXY(car_s+PROJECTION_IN_METERS*3,
-                                          (2+4*lane),
-                                          map_waypoints_s,
-                                          map_waypoints_x,
-                                          map_waypoints_y);
-
+          vector<double> next_wp0 = getXY(car_s + PROJECTION_IN_METERS, (2 + 4 * lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_wp1 = getXY(car_s + PROJECTION_IN_METERS*2, (2 + 4 * lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_wp2 = getXY(car_s + PROJECTION_IN_METERS*3, (2 + 4 * lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          
+          // Store path coordinates
           ptsx.push_back(next_wp0[0]);
           ptsx.push_back(next_wp1[0]);
           ptsx.push_back(next_wp2[0]);
-
+          
           ptsy.push_back(next_wp0[1]);
           ptsy.push_back(next_wp1[1]);
           ptsy.push_back(next_wp2[1]);
-
-
-          for (int i=0; i<ptsx.size(); i++){
+        
+          // Transform to s, d coordinates
+          for (int i = 0; i < ptsx.size(); i++)
+          {
             // Shift car reference angle to 0 degrees
             double shift_x = ptsx[i] - ref_x;
             double shift_y = ptsy[i] - ref_y;
-
-            ptsx[i] = (shift_x * cos(0-ref_yaw) - shift_y * sin(0-ref_yaw));
-            ptsy[i] = (shift_x * sin(0-ref_yaw) + shift_y * cos(0-ref_yaw));
+            
+            ptsx[i] = (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw));
+            ptsy[i] = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
           }
-
+          
           // Create a spline
           tk::spline s;
-
-          // Set (x,y) points to the spline
-          s.set_points(ptsx,ptsy);
           
-          // Start with all the previous path points from last time
-          for (int i=0; i<previous_path_x.size(); i++) {
+          // Set (x,y) points to the spline
+          s.set_points(ptsx, ptsy);
+          
+          // Define the actual (x,y) points we will use for the planner
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+          
+          // Start with all of the previous path points from last time
+          for (int i = 0; i < previous_path_x.size(); i++)
+          {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
           }
-
-          // Calculate how to break up spline points
-          // So we travel at our desired reference velocity
+          
+          // Calculate how to break up spline points so that we travel at our desired reference velocity
           double target_x = 30.0;
           double target_y = s(target_x);
-          double target_dist = sqrt((target_x)*(target_x) + (target_y)*(target_y));
+          double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
+          
           double x_add_on = 0;
-
-          // Fill up the rest of our path planner after filling it with prev points
-          // We will always output 50 points
-          for (int i=1; i<=50-previous_path_x.size(); i++) {
-            double N = (target_dist/(.02*ref_vel/2.24));
-            double x_point = x_add_on+(target_x)/N;
+          
+          // Fill up the rest of our path planner after filling in with previous points using 50 points
+          for (int i = 0; i < 50 - previous_path_x.size(); i++)
+          {
+            double N = (target_dist/(0.02 * ref_vel/2.24));
+            double x_point = x_add_on + (target_x)/N;
             double y_point = s(x_point);
-
+            
             x_add_on = x_point;
-
+            
             double x_ref = x_point;
             double y_ref = y_point;
-
+            
             // Rotate back to normal after rotating it earlier
-            x_point = (x_ref*cos(ref_yaw) - y_ref*sin(ref_yaw));
-            y_point = (x_ref*sin(ref_yaw) + y_ref*cos(ref_yaw));
-
+            x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
+            y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+            
             x_point += ref_x;
             y_point += ref_y;
-
+            
+            // Store final x y coordinates to give to the simulator
             next_x_vals.push_back(x_point);
             next_y_vals.push_back(y_point);
           }
-
-          /* END */
 
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
